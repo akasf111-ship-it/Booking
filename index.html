@@ -118,6 +118,12 @@ input::placeholder{color:rgba(255,255,255,.3);}
 .error-msg{text-align:center;padding:30px;color:#e05555;font-size:.9rem;line-height:1.7;}
 .logout-btn{background:transparent;border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.5);padding:8px 20px;font-family:'Cairo',sans-serif;font-size:.85rem;border-radius:4px;cursor:pointer;}
 .refresh-btn{background:transparent;border:1px solid rgba(200,151,42,.4);color:var(--gold-light);padding:8px 20px;font-family:'Cairo',sans-serif;font-size:.85rem;border-radius:4px;cursor:pointer;}
+.search-wrap{margin-bottom:20px;}
+.admin-search{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:12px 16px;font-family:'Cairo',sans-serif;font-size:.95rem;color:var(--white);transition:border-color .2s;}
+.admin-search:focus{outline:none;border-color:var(--gold);background:rgba(200,151,42,.06);}
+.admin-search::placeholder{color:rgba(255,255,255,.3);}
+.delete-btn{background:transparent;border:1px solid rgba(224,85,85,.4);color:rgba(224,85,85,.7);padding:5px 12px;font-family:'Cairo',sans-serif;font-size:.78rem;border-radius:4px;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.delete-btn:hover{border-color:#e05555;color:#e05555;background:rgba(224,85,85,.08);}
 .lightbox{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);z-index:2000;align-items:center;justify-content:center;}
 .lightbox.open{display:flex;}
 .lightbox img{max-width:92vw;max-height:88vh;border-radius:6px;}
@@ -254,6 +260,7 @@ input::placeholder{color:rgba(255,255,255,.3);}
         <h2>🎟️ اليوم الثقافي السوداني</h2>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <button class="refresh-btn" onclick="renderAdmin()">🔄 تحديث</button>
+          <button class="refresh-btn" onclick="exportExcel()">📥 تصدير Excel</button>
           <button class="logout-btn" onclick="adminLogout()">خروج</button>
         </div>
       </div>
@@ -261,6 +268,9 @@ input::placeholder{color:rgba(255,255,255,.3);}
         <div class="stat-card"><div class="stat-num" id="stat-total">—</div><div class="stat-lbl">إجمالي الحجوزات</div></div>
         <div class="stat-card"><div class="stat-num" id="stat-today">—</div><div class="stat-lbl">حجوزات اليوم</div></div>
         <div class="stat-card"><div class="stat-num" id="stat-remain">—</div><div class="stat-lbl">متبقي من 300</div></div>
+      </div>
+      <div class="search-wrap">
+        <input type="text" class="admin-search" id="admin-search" placeholder="🔍 ابحث بالاسم أو رقم الواتساب..." oninput="filterTickets()" dir="rtl">
       </div>
       <div class="tickets-table" id="tickets-table">
         <div class="loading-msg">جاري التحميل...</div>
@@ -340,24 +350,32 @@ async function apiInsert(data) {
 
 // ── Supabase: get all tickets ordered by id ──
 async function apiSelect() {
-  const r = await fetch(SURL + '/rest/v1/tickets?select=id,name,phone,created_at&order=id.asc', {
+  const r = await fetch(SURL + '/rest/v1/tickets?select=id,name,phone,ticket_number,created_at&order=id.asc', {
     headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY }
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
+// ── Find smallest available ticket number (fill gaps) ──
+function findNextTicketNumber(rows) {
+  const used = new Set(rows.map(r => r.ticket_number).filter(n => n != null));
+  let n = 1;
+  while (used.has(n)) n++;
+  return n;
+}
+
 // ── Supabase: get all tickets with images for admin ──
 async function apiSelectFull() {
-  const r = await fetch(SURL + '/rest/v1/tickets?select=*&order=id.asc', {
+  const r = await fetch(SURL + '/rest/v1/tickets?select=*&order=ticket_number.asc', {
     headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY }
   });
   if (!r.ok) throw new Error(await r.text());
   const rows = await r.json();
-  // assign sequential number based on insertion order
-  rows.forEach((row, i) => row.seq = i + 1);
+  // seq = ticket_number from DB (permanent, never changes)
+  rows.forEach(row => row.seq = row.ticket_number || row.id);
   // reverse for display (newest first)
-  return rows.reverse();
+  return rows.slice().reverse();
 }
 
 // ── navigation ──
@@ -404,17 +422,17 @@ async function submitBooking() {
       compressImage(payFile)
     ]);
 
-    // Step 2: get current count BEFORE insert
+    // Step 2: find next available ticket number (fills gaps from deleted tickets)
     setProgress(40, 'جاري التحقق من التذاكر...');
     const beforeRows = await apiSelect();
-    const countBefore = beforeRows.length;
+    const nextNum = findNextTicketNumber(beforeRows);
 
-    // Step 3: insert
+    // Step 3: insert with ticket_number saved permanently in DB
     setProgress(65, 'جاري إرسال البيانات...');
-    await apiInsert({ name, phone, id_image: idImg, pay_image: payImg });
+    await apiInsert({ name, phone, id_image: idImg, pay_image: payImg, ticket_number: nextNum });
 
-    // Step 4: ticket number = count before + 1
-    const seqNum = String(countBefore + 1).padStart(3, '0');
+    // Step 4: format ticket number
+    const seqNum = String(nextNum).padStart(3, '0');
     const ticketNum = 'SSA2625' + seqNum;
     setProgress(100, 'تم!');
 
@@ -466,40 +484,98 @@ function adminLogout() {
   goTo('page-landing');
 }
 
+let allTickets = [];
+
 async function renderAdmin() {
   const tbl = document.getElementById('tickets-table');
   tbl.innerHTML = '<div class="loading-msg">⏳ جاري تحميل البيانات...</div>';
   try {
-    const tickets = await apiSelectFull();
-    document.getElementById('stat-total').textContent  = tickets.length;
-    document.getElementById('stat-remain').textContent = Math.max(0, 300 - tickets.length);
+    allTickets = await apiSelectFull();
+    document.getElementById('stat-total').textContent  = allTickets.length;
+    document.getElementById('stat-remain').textContent = Math.max(0, 300 - allTickets.length);
     const today = new Date().toISOString().slice(0,10);
-    document.getElementById('stat-today').textContent  = tickets.filter(t=>(t.created_at||'').startsWith(today)).length;
-
-    if (!tickets.length) {
-      tbl.innerHTML = '<div class="no-tickets">لا توجد تذاكر حتى الآن</div>';
-      return;
-    }
-
-    tbl.innerHTML = tickets.map((t) => {
-      const num = String(t.seq).padStart(3, '0');
-      const date = t.created_at ? new Date(t.created_at).toLocaleString('ar-EG') : '';
-      return `<div class="ticket-row">
-        <div class="t-num">#${num}</div>
-        <div class="t-info">
-          <div class="t-name">${esc(t.name)}</div>
-          <div class="t-phone">${esc(t.phone)}</div>
-          <div class="t-date">${date}</div>
-        </div>
-        <div class="t-imgs">
-          <div class="t-img-wrap"><label>الكارنيه</label><img src="${t.id_image}" onclick="openLB('${t.id_image}')"></div>
-          <div class="t-img-wrap"><label>التحويل</label><img src="${t.pay_image}" onclick="openLB('${t.pay_image}')"></div>
-        </div>
-      </div>`;
-    }).join('');
+    document.getElementById('stat-today').textContent  = allTickets.filter(t=>(t.created_at||'').startsWith(today)).length;
+    renderTicketRows(allTickets);
   } catch(err) {
     tbl.innerHTML = `<div class="error-msg">❌ خطأ في تحميل البيانات<br><small>${err.message}</small></div>`;
   }
+}
+
+function renderTicketRows(tickets) {
+  const tbl = document.getElementById('tickets-table');
+  if (!tickets.length) {
+    tbl.innerHTML = '<div class="no-tickets">لا توجد نتائج</div>';
+    return;
+  }
+  tbl.innerHTML = tickets.map((t) => {
+    const num = String(t.seq).padStart(3, '0');
+    const date = t.created_at ? new Date(t.created_at).toLocaleString('ar-EG') : '';
+    return `<div class="ticket-row">
+      <div class="t-num">#${num}</div>
+      <div class="t-info">
+        <div class="t-name">${esc(t.name)}</div>
+        <div class="t-phone">${esc(t.phone)}</div>
+        <div class="t-date">${date}</div>
+      </div>
+      <div class="t-imgs">
+        <div class="t-img-wrap"><label>الكارنيه</label><img src="${t.id_image}" onclick="openLB('${t.id_image}')"></div>
+        <div class="t-img-wrap"><label>التحويل</label><img src="${t.pay_image}" onclick="openLB('${t.pay_image}')"></div>
+      </div>
+      <div style="display:flex;align-items:center;">
+        <button class="delete-btn" onclick="deleteTicket(${t.id}, '${esc(t.name)}')">🗑️ حذف</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterTickets() {
+  const q = document.getElementById('admin-search').value.trim().toLowerCase();
+  if (!q) { renderTicketRows(allTickets); return; }
+  const filtered = allTickets.filter(t =>
+    (t.name||'').toLowerCase().includes(q) ||
+    (t.phone||'').toLowerCase().includes(q)
+  );
+  renderTicketRows(filtered);
+}
+
+async function deleteTicket(id, name) {
+  if (!confirm(`هل تريد حذف تذكرة "${name}"؟\nلا يمكن التراجع عن هذا.`)) return;
+  try {
+    const r = await fetch(SURL + '/rest/v1/tickets?id=eq.' + id, {
+      method: 'DELETE',
+      headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY }
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await renderAdmin();
+  } catch(err) {
+    alert('حدث خطأ أثناء الحذف:\n' + err.message);
+  }
+}
+
+function exportExcel() {
+  if (!allTickets.length) { alert('لا توجد تذاكر للتصدير'); return; }
+
+  // Build CSV with BOM for Arabic support in Excel
+  const BOM = '\uFEFF';
+  const headers = ['رقم التذكرة', 'الاسم', 'رقم الواتساب', 'تاريخ الحجز'];
+  const rows = allTickets.map(t => [
+    '#' + String(t.seq).padStart(3,'0'),
+    t.name || '',
+    t.phone || '',
+    t.created_at ? new Date(t.created_at).toLocaleString('ar-EG') : ''
+  ]);
+
+  const csvContent = BOM + [headers, ...rows]
+    .map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(','))
+    .join('\n');
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'تذاكر-اليوم-الثقافي-السوداني.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
