@@ -124,6 +124,9 @@ input::placeholder{color:rgba(255,255,255,.3);}
 .admin-search::placeholder{color:rgba(255,255,255,.3);}
 .delete-btn{background:transparent;border:1px solid rgba(224,85,85,.4);color:rgba(224,85,85,.7);padding:5px 12px;font-family:'Cairo',sans-serif;font-size:.78rem;border-radius:4px;cursor:pointer;transition:all .2s;white-space:nowrap;}
 .delete-btn:hover{border-color:#e05555;color:#e05555;background:rgba(224,85,85,.08);}
+.show-imgs-btn{background:transparent;border:1px solid rgba(200,151,42,.35);color:var(--gold-light);padding:6px 14px;font-family:'Cairo',sans-serif;font-size:.78rem;border-radius:4px;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.show-imgs-btn:hover{background:rgba(200,151,42,.1);border-color:var(--gold);}
+.delete-btn:hover{border-color:#e05555;color:#e05555;background:rgba(224,85,85,.08);}
 .lightbox{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);z-index:2000;align-items:center;justify-content:center;}
 .lightbox.open{display:flex;}
 .lightbox img{max-width:92vw;max-height:88vh;border-radius:6px;}
@@ -367,15 +370,24 @@ function findNextTicketNumber(rows) {
 
 // ── Supabase: get all tickets with images for admin ──
 async function apiSelectFull() {
-  const r = await fetch(SURL + '/rest/v1/tickets?select=*&order=ticket_number.asc', {
+  // Load WITHOUT images first (fast)
+  const r = await fetch(SURL + '/rest/v1/tickets?select=id,name,phone,ticket_number,created_at&order=ticket_number.asc', {
     headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY }
   });
   if (!r.ok) throw new Error(await r.text());
   const rows = await r.json();
-  // seq = ticket_number from DB (permanent, never changes)
   rows.forEach(row => row.seq = row.ticket_number || row.id);
-  // reverse for display (newest first)
   return rows.slice().reverse();
+}
+
+// Load images for a single ticket on demand
+async function loadTicketImages(id) {
+  const r = await fetch(SURL + '/rest/v1/tickets?select=id_image,pay_image&id=eq.' + id, {
+    headers: { 'apikey': SKEY, 'Authorization': 'Bearer ' + SKEY }
+  });
+  if (!r.ok) throw new Error(await r.text());
+  const rows = await r.json();
+  return rows[0] || {};
 }
 
 // ── navigation ──
@@ -510,22 +522,34 @@ function renderTicketRows(tickets) {
   tbl.innerHTML = tickets.map((t) => {
     const num = String(t.seq).padStart(3, '0');
     const date = t.created_at ? new Date(t.created_at).toLocaleString('ar-EG') : '';
-    return `<div class="ticket-row">
+    return `<div class="ticket-row" id="row-${t.id}">
       <div class="t-num">#${num}</div>
       <div class="t-info">
         <div class="t-name">${esc(t.name)}</div>
         <div class="t-phone">${esc(t.phone)}</div>
         <div class="t-date">${date}</div>
       </div>
-      <div class="t-imgs">
-        <div class="t-img-wrap"><label>الكارنيه</label><img src="${t.id_image}" onclick="openLB('${t.id_image}')"></div>
-        <div class="t-img-wrap"><label>التحويل</label><img src="${t.pay_image}" onclick="openLB('${t.pay_image}')"></div>
+      <div class="t-imgs" id="imgs-${t.id}">
+        <button class="show-imgs-btn" onclick="showImages(${t.id})">🖼️ عرض الصور</button>
       </div>
       <div style="display:flex;align-items:center;">
         <button class="delete-btn" onclick="deleteTicket(${t.id}, '${esc(t.name)}')">🗑️ حذف</button>
       </div>
     </div>`;
   }).join('');
+}
+
+async function showImages(id) {
+  const wrap = document.getElementById('imgs-' + id);
+  wrap.innerHTML = '<span style="color:rgba(255,255,255,.4);font-size:.8rem;">جاري التحميل...</span>';
+  try {
+    const imgs = await loadTicketImages(id);
+    wrap.innerHTML = `
+      <div class="t-img-wrap"><label>الكارنيه</label><img src="${imgs.id_image}" onclick="openLB('${imgs.id_image}')"></div>
+      <div class="t-img-wrap"><label>التحويل</label><img src="${imgs.pay_image}" onclick="openLB('${imgs.pay_image}')"></div>`;
+  } catch(e) {
+    wrap.innerHTML = '<span style="color:#e05555;font-size:.8rem;">❌ فشل التحميل</span>';
+  }
 }
 
 function filterTickets() {
